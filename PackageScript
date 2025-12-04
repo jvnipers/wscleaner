@@ -1,0 +1,34 @@
+# vim: set ts=2 sw=2 tw=99 noet ft=python: 
+import os
+
+builder.SetBuildFolder('package')
+
+metamod_folder = builder.AddFolder(os.path.join('addons', 'metamod'))
+bin_folder_path = os.path.join('addons', MMSPlugin.metadata['name'], 'bin')
+bin_folder = builder.AddFolder(bin_folder_path)
+
+pdb_list = []
+for task in MMSPlugin.binaries:
+  # This hardly assumes there's only 1 targetted platform and would be overwritten
+  # with whatever comes last if multiple are used!
+  with open(os.path.join(builder.buildPath, MMSPlugin.metadata['name'] + '.vdf'), 'w') as fp:
+    fp.write('"Metamod Plugin"\n')
+    fp.write('{\n')
+    fp.write(f'\t"alias"\t"{MMSPlugin.metadata["alias"]}"\n')
+    fp.write(f'\t"file"\t"{os.path.join(bin_folder_path, MMSPlugin.metadata["name"])}"\n')
+    fp.write('}\n')
+
+    builder.AddCopy(task.binary, bin_folder)
+
+  if task.debug:
+    pdb_list.append(task.debug)
+
+builder.AddCopy(os.path.join(builder.buildPath, MMSPlugin.metadata['name'] + '.vdf'), metamod_folder)
+
+# Generate PDB info.
+with open(os.path.join(builder.buildPath, 'pdblog.txt'), 'wt') as fp:
+  for line in pdb_list:
+    fp.write(line.path + '\n')
+
+cfg_folder = builder.AddFolder(os.path.join('cfg', MMSPlugin.metadata['name']))
+builder.AddCopy(os.path.join(builder.sourcePath, 'cfg', MMSPlugin.metadata['name'], MMSPlugin.metadata['name'] + '.cfg'), cfg_folder)
