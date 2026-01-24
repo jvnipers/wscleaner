@@ -28,7 +28,12 @@ jobs:
           path: ./ambuild
 
       - name: Install AMBuild
-        run: cd ambuild && python setup.py install && cd ..
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            pip install setuptools
+          fi
+          cd ambuild && python setup.py install && cd ..
 
       - name: Build
         shell: bash
