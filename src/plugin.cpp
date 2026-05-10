@@ -11,6 +11,7 @@ CSteamGameServerAPIContext g_SteamAPI;
 WSCleanerPlugin g_ThisPlugin;
 PLUGIN_EXPOSE(WSCleanerPlugin, g_ThisPlugin);
 CConVar<CUtlString> wscleaner_exclude("wscleaner_exclude", FCVAR_NONE, "Comma-separated list of addons that will not be deleted by the plugin.", "");
+CConVar<bool> wscleaner_auto_clean("wscleaner_auto_clean", FCVAR_NONE, "If enabled, automatically clean unused workshop addons on every level init. Enabled by default.", true);
 
 void GetDownloadedAddonList(std::set<uint64> &outList)
 {
@@ -205,10 +206,47 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 							bool loadGame, 
 							bool background) 
 {
-	std::set<uint64> downloadedAddons;
-	GetDownloadedAddonList(downloadedAddons);
+	// Always remember any addon currently mounted so we never auto-delete it later in this session.
+	if (g_pEngineServiceMgr)
+	{
+		int numAddons = g_pEngineServiceMgr->GetAddonCount();
+		for (int i = 0; i < numAddons; ++i)
+		{
+			const char *addonName = g_pEngineServiceMgr->GetAddon(i);
+			if (addonName && addonName[0] != '\0')
+			{
+				uint64 addonID = strtoull(addonName, nullptr, 10);
+				if (addonID != 0)
+					m_SessionLoadedAddons.insert(addonID);
+			}
+		}
+	}
+
+	if (!wscleaner_auto_clean.Get())
+		return;
+
+	DoCleanup();
+}
+
+void WSCleanerPlugin::DoCleanup()
+{
 	std::set<uint64> whitelistedAddons;
 	GetWhitelistedAddons(whitelistedAddons);
+
+	// Safety: if the engine reports no mounted addons right now, the addon list is unreliable
+	// (e.g. we are mid-transition) -- refuse to delete to avoid wiping content the engine is about to mount for the next map.
+	if (whitelistedAddons.empty())
+	{
+		META_CONPRINTF("[WSCleaner] Skipping cleanup: no mounted addons reported by the engine.\n");
+		return;
+	}
+
+	// Merge in addons that have ever been mounted during this session.
+	for (uint64 id : m_SessionLoadedAddons)
+		whitelistedAddons.insert(id);
+
+	std::set<uint64> downloadedAddons;
+	GetDownloadedAddonList(downloadedAddons);
 	for (const auto &addonID : downloadedAddons)
 	{
 		if (whitelistedAddons.find(addonID) == whitelistedAddons.end())
@@ -223,6 +261,11 @@ void WSCleanerPlugin::Hook_GameServerSteamAPIActivated()
 	if (g_SteamAPI.SteamUGC())
 		return;
 	g_SteamAPI.Init();
+}
+
+CON_COMMAND_F(wscleaner_clean, "Manually clean unused workshop addons now.", FCVAR_NONE)
+{
+	g_ThisPlugin.DoCleanup();
 }
 
 CON_COMMAND_F(wscleaner_exclude_add, "Add an addon to the addon whitelist", FCVAR_NONE)
