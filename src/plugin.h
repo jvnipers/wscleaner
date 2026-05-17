@@ -4,7 +4,6 @@
 #include <ISmmPlugin.h>
 #include <igameevents.h>
 #include <sh_vector.h>
-#include <set>
 #include "version_gen.h"
 #include "steam/isteamugc.h"
 
@@ -25,11 +24,6 @@ public:
 	void Hook_GameServerSteamAPIActivated();
 
 	void DoCleanup();
-
-	// Addons that have been mounted at any point during this server session.
-	// Once an addon has been seen mounted, the plugin will not auto-delete it
-	// for the remainder of the session, even if it is not currently mounted.
-	std::set<uint64> m_SessionLoadedAddons;
 public:
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }
 	const char *GetName() { return PLUGIN_DISPLAY_NAME; }

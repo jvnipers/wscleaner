@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdarg.h>
+#include <vector>
 #include "plugin.h"
 #include "steam/steam_gameserver.h"
 #include "filesystem.h"
@@ -13,7 +14,6 @@ CSteamGameServerAPIContext g_SteamAPI;
 WSCleanerPlugin g_ThisPlugin;
 PLUGIN_EXPOSE(WSCleanerPlugin, g_ThisPlugin);
 CConVar<CUtlString> wscleaner_exclude("wscleaner_exclude", FCVAR_NONE, "Comma-separated list of addons that will not be deleted by the plugin.", "");
-CConVar<bool> wscleaner_auto_clean("wscleaner_auto_clean", FCVAR_NONE, "If enabled, automatically clean unused workshop addons on every level init. Enabled by default.", true);
 CConVar<bool> wscleaner_debug("wscleaner_debug", FCVAR_NONE, "If enabled, log snapshots of the workshop content folder and appworkshop_730.acf before and after each cleanup pass.", false);
 
 static void WSCleaner_GetWorkshopRoot(char *out, size_t outLen)
@@ -192,6 +192,69 @@ void GetDownloadedAddonList(std::set<uint64> &outList)
 	g_pFullFileSystem->FindClose(findHandle);
 }
 
+// Walk the ACF's WorkshopItemsInstalled / WorkshopItemDetails sections and remove any
+// entry whose corresponding directory under content/730/<id> does not exist on disk.
+// Returns the number of stale entries pruned. Stale entries cause the engine to try to
+// mount addons whose files aren't actually there, which falls back to the 'error' map.
+int PruneStaleACFEntries()
+{
+	if (!g_pFullFileSystem)
+		return 0;
+
+	char szWorkshop[1024];
+	V_MakeAbsolutePath(szWorkshop, sizeof(szWorkshop), ".\\steamapps\\workshop");
+	std::string acfPath = std::string(szWorkshop) + "/appworkshop_730.acf";
+	std::string contentRoot = std::string(szWorkshop) + "/content/730";
+
+	KeyValues *pACF = new KeyValues("AppWorkshop");
+	KeyValues::AutoDelete autoDelete(pACF);
+	if (!pACF->LoadFromFile(g_pFullFileSystem, acfPath.c_str(), "GAME"))
+		return 0;
+
+	auto pruneSection = [&](const char *sectionName) -> int
+	{
+		KeyValues *pSection = pACF->FindKey(sectionName);
+		if (!pSection)
+			return 0;
+		int pruned = 0;
+		// Collect candidate IDs first so we can safely delete while iterating.
+		std::vector<std::string> stale;
+		for (KeyValues *pItem = pSection->GetFirstSubKey(); pItem; pItem = pItem->GetNextKey())
+		{
+			const char *idStr = pItem->GetName();
+			if (!idStr || idStr[0] == '\0')
+				continue;
+			uint64 id = strtoull(idStr, nullptr, 10);
+			if (id == 0)
+				continue;
+			std::string folder = contentRoot + "/" + idStr;
+			if (!g_pFullFileSystem->IsDirectory(folder.c_str(), "GAME"))
+				stale.push_back(idStr);
+		}
+		for (const auto &idStr : stale)
+		{
+			if (pSection->FindAndDeleteSubKey(idStr.c_str()))
+			{
+				META_CONPRINTF("[WSCleaner] Pruned stale ACF entry from %s: %s (folder missing)\n", sectionName, idStr.c_str());
+				++pruned;
+			}
+		}
+		return pruned;
+	};
+
+	int totalPruned = 0;
+	totalPruned += pruneSection("WorkshopItemsInstalled");
+	totalPruned += pruneSection("WorkshopItemDetails");
+
+	if (totalPruned > 0)
+	{
+		pACF->SaveToFile(g_pFullFileSystem, acfPath.c_str(), "GAME");
+		if (g_SteamAPI.SteamUGC())
+			g_SteamAPI.SteamUGC()->BInitWorkshopForGameServer(730, szWorkshop);
+	}
+	return totalPruned;
+}
+
 // Remove the addon with the given ID from the workshop folder, update the acf file accordingly, and reload the workshop items.
 void RemoveAddon(uint64 addonID)
 {
@@ -358,88 +421,27 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 							bool loadGame, 
 							bool background) 
 {
-	// Snapshot currently mounted addons. Anything ever seen mounted this session is recorded
-	// so it can be considered for auto-cleanup once it's no longer mounted.
-	std::set<uint64> currentlyMounted;
-	if (g_pEngineServiceMgr)
-	{
-		int numAddons = g_pEngineServiceMgr->GetAddonCount();
-		for (int i = 0; i < numAddons; ++i)
-		{
-			const char *addonName = g_pEngineServiceMgr->GetAddon(i);
-			if (addonName && addonName[0] != '\0')
-			{
-				uint64 addonID = strtoull(addonName, nullptr, 10);
-				if (addonID != 0)
-				{
-					currentlyMounted.insert(addonID);
-					m_SessionLoadedAddons.insert(addonID);
-				}
-			}
-		}
-	}
+	// Always reconcile the ACF against the on-disk content folder. If a prior cleanup,
+	// Steam container restart, or external file deletion left the ACF claiming an addon
+	// is installed when its folder is missing, the engine will try to mount it on the
+	// next changelevel, fail to find any maps, and fall back to the 'error' map.
+	PruneStaleACFEntries();
 
-	if (!wscleaner_auto_clean.Get())
-		return;
-
-	// Safety: if the engine reports no mounted addons right now, the addon list is unreliable
-	// (e.g. we are mid-transition) -- refuse to delete to avoid wiping content the engine is
-	// about to mount for the next map.
-	if (currentlyMounted.empty())
-	{
-		META_CONPRINTF("[WSCleaner] Skipping auto-cleanup: no mounted addons reported by the engine.\n");
-		return;
-	}
-
-	// Build the protected set:
-	//  - addons currently mounted by the engine
-	//  - addons listed in wscleaner_exclude / +host_workshop_map
-	std::set<uint64> protectedAddons;
-	GetWhitelistedAddons(protectedAddons);
-	for (uint64 id : currentlyMounted)
-		protectedAddons.insert(id);
-
-	// Auto-cleanup is conservative: only delete addons that we have observed mounted
-	// during this session and are no longer mounted now. Addons sitting on disk that
-	// have never been mounted this session are left alone -- they may be pre-downloads
-	// queued for an upcoming changelevel (e.g. via MultiAddonManager or RTV pick).
-	// Use `wscleaner_clean` to manually wipe everything not currently mounted.
-	std::set<uint64> downloadedAddons;
-	GetDownloadedAddonList(downloadedAddons);
-
-	// Decide whether anything is actually going to be removed before paying for snapshots.
-	bool willRemoveAny = false;
-	for (const auto &addonID : downloadedAddons)
-	{
-		if (protectedAddons.find(addonID) != protectedAddons.end())
-			continue;
-		if (m_SessionLoadedAddons.find(addonID) == m_SessionLoadedAddons.end())
-			continue;
-		willRemoveAny = true;
-		break;
-	}
-	if (!willRemoveAny)
-		return;
-
-	WSCleaner_DumpSnapshots("before auto-cleanup");
-	for (const auto &addonID : downloadedAddons)
-	{
-		if (protectedAddons.find(addonID) != protectedAddons.end())
-			continue;
-		if (m_SessionLoadedAddons.find(addonID) == m_SessionLoadedAddons.end())
-			continue; // never seen mounted this session -- might be a pending pre-download
-		RemoveAddon(addonID);
-	}
-	WSCleaner_DumpSnapshots("after auto-cleanup");
+	DoCleanup();
 }
 
 void WSCleanerPlugin::DoCleanup()
 {
-	// Manual cleanup: aggressive. Delete every downloaded addon that is not currently mounted
-	// and not in the wscleaner_exclude / +host_workshop_map whitelist.
+	// Delete every downloaded addon that is not currently mounted and not in the
+	// wscleaner_exclude / +host_workshop_map whitelist. The ACF prune step in
+	// OnLevelInit (and the wscleaner_prune_acf command) keeps the ACF in sync with
+	// disk so the engine won't try to mount addons we have removed.
 	std::set<uint64> protectedAddons;
 	GetWhitelistedAddons(protectedAddons);
 
+	// Safety: if the engine reports no mounted addons right now, the addon list is
+	// unreliable (e.g. we are mid-transition) -- refuse to delete to avoid wiping
+	// content the engine is about to mount for the next map.
 	if (protectedAddons.empty())
 	{
 		META_CONPRINTF("[WSCleaner] Skipping cleanup: no mounted addons reported by the engine.\n");
@@ -461,7 +463,7 @@ void WSCleanerPlugin::DoCleanup()
 	if (!willRemoveAny)
 		return;
 
-	WSCleaner_DumpSnapshots("before manual cleanup");
+	WSCleaner_DumpSnapshots("before cleanup");
 	for (const auto &addonID : downloadedAddons)
 	{
 		if (protectedAddons.find(addonID) == protectedAddons.end())
@@ -469,7 +471,7 @@ void WSCleanerPlugin::DoCleanup()
 			RemoveAddon(addonID);
 		}
 	}
-	WSCleaner_DumpSnapshots("after manual cleanup");
+	WSCleaner_DumpSnapshots("after cleanup");
 }
 
 void WSCleanerPlugin::Hook_GameServerSteamAPIActivated()
@@ -482,6 +484,12 @@ void WSCleanerPlugin::Hook_GameServerSteamAPIActivated()
 CON_COMMAND_F(wscleaner_clean, "Manually clean unused workshop addons now.", FCVAR_NONE)
 {
 	g_ThisPlugin.DoCleanup();
+}
+
+CON_COMMAND_F(wscleaner_prune_acf, "Remove ACF entries for workshop addons whose folder is missing on disk.", FCVAR_NONE)
+{
+	int pruned = PruneStaleACFEntries();
+	META_CONPRINTF("[WSCleaner] ACF prune complete. %d stale entries removed.\n", pruned);
 }
 
 CON_COMMAND_F(wscleaner_exclude_add, "Add an addon to the addon whitelist", FCVAR_NONE)
