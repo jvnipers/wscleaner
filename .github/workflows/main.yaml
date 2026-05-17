@@ -17,12 +17,12 @@ jobs:
             container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
       - name: Clone AMBuild
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: alliedmodders/ambuild
           path: ./ambuild
@@ -44,7 +44,7 @@ jobs:
           ambuild
 
       - name: Archive build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wscleaner-${{ runner.os }}
           path: ./build/package
@@ -56,9 +56,9 @@ jobs:
     needs:
       - build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /home/runner/artifacts
 
@@ -85,7 +85,7 @@ jobs:
           git push -f origin $TAG_NAME
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG_NAME }}
           files: |
