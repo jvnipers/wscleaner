@@ -22,6 +22,8 @@ public:
 						bool background);
 
 	void Hook_GameServerSteamAPIActivated();
+
+	void DoCleanup();
 public:
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }
 	const char *GetName() { return PLUGIN_DISPLAY_NAME; }
