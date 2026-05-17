@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <time.h>
+#include <stdarg.h>
 #include "plugin.h"
 #include "steam/steam_gameserver.h"
 #include "filesystem.h"
@@ -12,6 +14,156 @@ WSCleanerPlugin g_ThisPlugin;
 PLUGIN_EXPOSE(WSCleanerPlugin, g_ThisPlugin);
 CConVar<CUtlString> wscleaner_exclude("wscleaner_exclude", FCVAR_NONE, "Comma-separated list of addons that will not be deleted by the plugin.", "");
 CConVar<bool> wscleaner_auto_clean("wscleaner_auto_clean", FCVAR_NONE, "If enabled, automatically clean unused workshop addons on every level init. Enabled by default.", true);
+CConVar<bool> wscleaner_debug("wscleaner_debug", FCVAR_NONE, "If enabled, log snapshots of the workshop content folder and appworkshop_730.acf before and after each cleanup pass.", false);
+
+static void WSCleaner_GetWorkshopRoot(char *out, size_t outLen)
+{
+	V_MakeAbsolutePath(out, outLen, ".\\steamapps\\workshop");
+}
+
+static void WSCleaner_GetDebugLogPath(char *out, size_t outLen)
+{
+	V_MakeAbsolutePath(out, outLen, ".\\logs\\wscleaner_debug.log");
+}
+
+// Print a line to the server console AND, if pLog is non-null, append it to the debug log file.
+static void WSCleaner_DebugPrintf(FILE *pLog, const char *fmt, ...)
+{
+	char buffer[4096];
+	va_list args;
+	va_start(args, fmt);
+	V_vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+
+	META_CONPRINTF("%s", buffer);
+	if (pLog)
+	{
+		fputs(buffer, pLog);
+	}
+}
+
+static FILE *WSCleaner_OpenDebugLog()
+{
+	char szLogPath[1024];
+	WSCleaner_GetDebugLogPath(szLogPath, sizeof(szLogPath));
+
+	// Ensure the logs directory exists.
+	if (g_pFullFileSystem)
+	{
+		char szLogsDir[1024];
+		V_MakeAbsolutePath(szLogsDir, sizeof(szLogsDir), ".\\logs");
+		g_pFullFileSystem->CreateDirHierarchy(szLogsDir, "DEFAULT_WRITE_PATH");
+	}
+
+	FILE *pLog = fopen(szLogPath, "ab");
+	if (!pLog)
+	{
+		META_CONPRINTF("[WSCleaner][debug] WARNING: could not open debug log file '%s' for append.\n", szLogPath);
+	}
+	return pLog;
+}
+
+// Dump the list of subfolders under steamapps/workshop/content/730 with a header tag.
+static void WSCleaner_DumpContentFolderSnapshot(FILE *pLog, const char *tag)
+{
+	if (!g_pFullFileSystem)
+		return;
+
+	char szWorkshop[1024];
+	WSCleaner_GetWorkshopRoot(szWorkshop, sizeof(szWorkshop));
+	std::string contentDir = std::string(szWorkshop) + "/content/730";
+	std::string searchPath = contentDir + "/*";
+
+	WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] --- content folder snapshot (%s) : %s ---\n", tag, contentDir.c_str());
+
+	FileFindHandle_t findHandle = {};
+	const char *fileName = g_pFullFileSystem->FindFirstEx(searchPath.c_str(), "GAME", &findHandle);
+	int count = 0;
+	while (fileName)
+	{
+		if (g_pFullFileSystem->FindIsDirectory(findHandle)
+			&& V_strcmp(fileName, ".") != 0
+			&& V_strcmp(fileName, "..") != 0)
+		{
+			WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug]   %s\n", fileName);
+			++count;
+		}
+		fileName = g_pFullFileSystem->FindNext(findHandle);
+	}
+	g_pFullFileSystem->FindClose(findHandle);
+
+	WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] --- end content folder snapshot (%s) : %d entries ---\n", tag, count);
+}
+
+// Dump the raw contents of appworkshop_730.acf with a header tag.
+static void WSCleaner_DumpACFSnapshot(FILE *pLog, const char *tag)
+{
+	if (!g_pFullFileSystem)
+		return;
+
+	char szWorkshop[1024];
+	WSCleaner_GetWorkshopRoot(szWorkshop, sizeof(szWorkshop));
+	std::string acfPath = std::string(szWorkshop) + "/appworkshop_730.acf";
+
+	WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] --- acf snapshot (%s) : %s ---\n", tag, acfPath.c_str());
+
+	FileHandle_t hFile = g_pFullFileSystem->Open(acfPath.c_str(), "rb", "GAME");
+	if (!hFile)
+	{
+		WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug]   (acf not found or could not be opened)\n");
+		WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] --- end acf snapshot (%s) ---\n", tag);
+		return;
+	}
+
+	unsigned int size = g_pFullFileSystem->Size(hFile);
+	std::string buffer;
+	buffer.resize(size + 1);
+	g_pFullFileSystem->Read(&buffer[0], size, hFile);
+	g_pFullFileSystem->Close(hFile);
+	buffer[size] = '\0';
+
+	// Print line-by-line so individual lines aren't truncated by console buffer limits.
+	size_t start = 0;
+	for (size_t i = 0; i <= size; ++i)
+	{
+		if (i == size || buffer[i] == '\n')
+		{
+			size_t end = i;
+			if (end > start && buffer[end - 1] == '\r')
+				--end;
+			std::string line = buffer.substr(start, end - start);
+			WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug]   %s\n", line.c_str());
+			start = i + 1;
+		}
+	}
+
+	WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] --- end acf snapshot (%s) : %u bytes ---\n", tag, size);
+}
+
+static void WSCleaner_DumpSnapshots(const char *tag)
+{
+	if (!wscleaner_debug.Get())
+		return;
+
+	FILE *pLog = WSCleaner_OpenDebugLog();
+
+	time_t now = time(nullptr);
+	struct tm tmBuf;
+#ifdef _WIN32
+	localtime_s(&tmBuf, &now);
+#else
+	localtime_r(&now, &tmBuf);
+#endif
+	char szTimestamp[64];
+	strftime(szTimestamp, sizeof(szTimestamp), "%Y-%m-%d %H:%M:%S", &tmBuf);
+	WSCleaner_DebugPrintf(pLog, "[WSCleaner][debug] ===== %s : %s =====\n", szTimestamp, tag);
+
+	WSCleaner_DumpContentFolderSnapshot(pLog, tag);
+	WSCleaner_DumpACFSnapshot(pLog, tag);
+
+	if (pLog)
+		fclose(pLog);
+}
 
 void GetDownloadedAddonList(std::set<uint64> &outList)
 {
@@ -206,7 +358,9 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 							bool loadGame, 
 							bool background) 
 {
-	// Always remember any addon currently mounted so we never auto-delete it later in this session.
+	// Snapshot currently mounted addons. Anything ever seen mounted this session is recorded
+	// so it can be considered for auto-cleanup once it's no longer mounted.
+	std::set<uint64> currentlyMounted;
 	if (g_pEngineServiceMgr)
 	{
 		int numAddons = g_pEngineServiceMgr->GetAddonCount();
@@ -217,7 +371,10 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 			{
 				uint64 addonID = strtoull(addonName, nullptr, 10);
 				if (addonID != 0)
+				{
+					currentlyMounted.insert(addonID);
 					m_SessionLoadedAddons.insert(addonID);
+				}
 			}
 		}
 	}
@@ -225,35 +382,94 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 	if (!wscleaner_auto_clean.Get())
 		return;
 
-	DoCleanup();
+	// Safety: if the engine reports no mounted addons right now, the addon list is unreliable
+	// (e.g. we are mid-transition) -- refuse to delete to avoid wiping content the engine is
+	// about to mount for the next map.
+	if (currentlyMounted.empty())
+	{
+		META_CONPRINTF("[WSCleaner] Skipping auto-cleanup: no mounted addons reported by the engine.\n");
+		return;
+	}
+
+	// Build the protected set:
+	//  - addons currently mounted by the engine
+	//  - addons listed in wscleaner_exclude / +host_workshop_map
+	std::set<uint64> protectedAddons;
+	GetWhitelistedAddons(protectedAddons);
+	for (uint64 id : currentlyMounted)
+		protectedAddons.insert(id);
+
+	// Auto-cleanup is conservative: only delete addons that we have observed mounted
+	// during this session and are no longer mounted now. Addons sitting on disk that
+	// have never been mounted this session are left alone -- they may be pre-downloads
+	// queued for an upcoming changelevel (e.g. via MultiAddonManager or RTV pick).
+	// Use `wscleaner_clean` to manually wipe everything not currently mounted.
+	std::set<uint64> downloadedAddons;
+	GetDownloadedAddonList(downloadedAddons);
+
+	// Decide whether anything is actually going to be removed before paying for snapshots.
+	bool willRemoveAny = false;
+	for (const auto &addonID : downloadedAddons)
+	{
+		if (protectedAddons.find(addonID) != protectedAddons.end())
+			continue;
+		if (m_SessionLoadedAddons.find(addonID) == m_SessionLoadedAddons.end())
+			continue;
+		willRemoveAny = true;
+		break;
+	}
+	if (!willRemoveAny)
+		return;
+
+	WSCleaner_DumpSnapshots("before auto-cleanup");
+	for (const auto &addonID : downloadedAddons)
+	{
+		if (protectedAddons.find(addonID) != protectedAddons.end())
+			continue;
+		if (m_SessionLoadedAddons.find(addonID) == m_SessionLoadedAddons.end())
+			continue; // never seen mounted this session -- might be a pending pre-download
+		RemoveAddon(addonID);
+	}
+	WSCleaner_DumpSnapshots("after auto-cleanup");
 }
 
 void WSCleanerPlugin::DoCleanup()
 {
-	std::set<uint64> whitelistedAddons;
-	GetWhitelistedAddons(whitelistedAddons);
+	// Manual cleanup: aggressive. Delete every downloaded addon that is not currently mounted
+	// and not in the wscleaner_exclude / +host_workshop_map whitelist.
+	std::set<uint64> protectedAddons;
+	GetWhitelistedAddons(protectedAddons);
 
-	// Safety: if the engine reports no mounted addons right now, the addon list is unreliable
-	// (e.g. we are mid-transition) -- refuse to delete to avoid wiping content the engine is about to mount for the next map.
-	if (whitelistedAddons.empty())
+	if (protectedAddons.empty())
 	{
 		META_CONPRINTF("[WSCleaner] Skipping cleanup: no mounted addons reported by the engine.\n");
 		return;
 	}
 
-	// Merge in addons that have ever been mounted during this session.
-	for (uint64 id : m_SessionLoadedAddons)
-		whitelistedAddons.insert(id);
-
 	std::set<uint64> downloadedAddons;
 	GetDownloadedAddonList(downloadedAddons);
+
+	bool willRemoveAny = false;
 	for (const auto &addonID : downloadedAddons)
 	{
-		if (whitelistedAddons.find(addonID) == whitelistedAddons.end())
+		if (protectedAddons.find(addonID) == protectedAddons.end())
+		{
+			willRemoveAny = true;
+			break;
+		}
+	}
+	if (!willRemoveAny)
+		return;
+
+	WSCleaner_DumpSnapshots("before manual cleanup");
+	for (const auto &addonID : downloadedAddons)
+	{
+		if (protectedAddons.find(addonID) == protectedAddons.end())
 		{
 			RemoveAddon(addonID);
 		}
 	}
+	WSCleaner_DumpSnapshots("after manual cleanup");
 }
 
 void WSCleanerPlugin::Hook_GameServerSteamAPIActivated()
