@@ -18,12 +18,48 @@ CConVar<bool> wscleaner_debug("wscleaner_debug", FCVAR_NONE, "If enabled, log sn
 
 static void WSCleaner_GetWorkshopRoot(char *out, size_t outLen)
 {
-	V_MakeAbsolutePath(out, outLen, ".\\steamapps\\workshop");
+	V_MakeAbsolutePath(out, outLen, "./steamapps/workshop");
+}
+
+static std::string WSCleaner_ContentRoot()
+{
+	char szWorkshop[1024];
+	WSCleaner_GetWorkshopRoot(szWorkshop, sizeof(szWorkshop));
+	return std::string(szWorkshop) + "/content/730";
+}
+
+// wscleaner_exclude lives in a file of its own so exclude_add/remove survive a restart.
+// wscleaner.cfg is hand-edited and would overwrite anything written back.
+static const char *kExcludeCfgRelative = "cfg/wscleaner/exclude.cfg";
+static const char *kExcludeCfgExec = "exec wscleaner/exclude";
+
+static void WSCleaner_SaveExclude()
+{
+	if (!g_pFullFileSystem)
+		return;
+
+	char szDir[1024];
+	V_MakeAbsolutePath(szDir, sizeof(szDir), "./cfg/wscleaner");
+	g_pFullFileSystem->CreateDirHierarchy(szDir, "DEFAULT_WRITE_PATH");
+
+	char szPath[1024];
+	V_snprintf(szPath, sizeof(szPath), "%s/exclude.cfg", szDir);
+
+	FILE *pFile = fopen(szPath, "wb");
+	if (!pFile)
+	{
+		META_CONPRINTF("[WSCleaner] WARNING: could not write '%s', exclusions will not survive a restart.\n", szPath);
+		return;
+	}
+
+	fprintf(pFile, "// Written by wscleaner_exclude_add / wscleaner_exclude_remove. Edited by hand at your own risk.\n");
+	fprintf(pFile, "wscleaner_exclude \"%s\"\n", wscleaner_exclude.Get().Get());
+	fclose(pFile);
 }
 
 static void WSCleaner_GetDebugLogPath(char *out, size_t outLen)
 {
-	V_MakeAbsolutePath(out, outLen, ".\\logs\\wscleaner_debug.log");
+	V_MakeAbsolutePath(out, outLen, "./logs/wscleaner_debug.log");
 }
 
 static void WSCleaner_DebugPrintf(FILE *pLog, const char *fmt, ...)
@@ -49,7 +85,7 @@ static FILE *WSCleaner_OpenDebugLog()
 	if (g_pFullFileSystem)
 	{
 		char szLogsDir[1024];
-		V_MakeAbsolutePath(szLogsDir, sizeof(szLogsDir), ".\\logs");
+		V_MakeAbsolutePath(szLogsDir, sizeof(szLogsDir), "./logs");
 		g_pFullFileSystem->CreateDirHierarchy(szLogsDir, "DEFAULT_WRITE_PATH");
 	}
 
@@ -169,15 +205,15 @@ void GetDownloadedAddonList(std::set<uint64> &outList)
 	if (!g_pFullFileSystem)
 		return;
 	
-	char szAbsolutePath[1024];
-	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop\\content\\730");
 	// Loop through all the directories in the workshop folder
-	std::string searchPath = std::string(szAbsolutePath) + "/*";
+	std::string searchPath = WSCleaner_ContentRoot() + "/*";
 	FileFindHandle_t findHandle = {};
 	const char *fileName = g_pFullFileSystem->FindFirstEx(searchPath.c_str(), "GAME", &findHandle);
 	while (fileName)
 	{
-		if (g_pFullFileSystem->FindIsDirectory(findHandle))
+		if (g_pFullFileSystem->FindIsDirectory(findHandle)
+			&& V_strcmp(fileName, ".") != 0
+			&& V_strcmp(fileName, "..") != 0)
 		{
 			uint64 addonID = strtoull(fileName, nullptr, 10);
 			if (addonID != 0)
@@ -206,9 +242,9 @@ int PruneStaleACFEntries()
 		return 0;
 
 	char szWorkshop[1024];
-	V_MakeAbsolutePath(szWorkshop, sizeof(szWorkshop), ".\\steamapps\\workshop");
+	WSCleaner_GetWorkshopRoot(szWorkshop, sizeof(szWorkshop));
 	std::string acfPath = std::string(szWorkshop) + "/appworkshop_730.acf";
-	std::string contentRoot = std::string(szWorkshop) + "/content/730";
+	std::string contentRoot = WSCleaner_ContentRoot();
 
 	KeyValues *pACF = new KeyValues("AppWorkshop");
 	KeyValues::AutoDelete autoDelete(pACF);
@@ -268,10 +304,10 @@ void RemoveAddon(uint64 addonID)
 	if (!g_pFullFileSystem || !g_SteamAPI.SteamUGC())
 		return;
 	char szAbsolutePath[1024];
-	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop");
+	WSCleaner_GetWorkshopRoot(szAbsolutePath, sizeof(szAbsolutePath));
 	char addonIDStr[32];
 	V_snprintf(addonIDStr, sizeof(addonIDStr), "%llu", addonID);
-	std::string fullPath = std::string(szAbsolutePath) + "/content/730/" + addonIDStr;
+	std::string fullPath = WSCleaner_ContentRoot() + "/" + addonIDStr;
 	if (g_pFullFileSystem->IsDirectory(fullPath.c_str(), "GAME"))
 	{
 		if (g_pFullFileSystem->DeleteDirectoryAndContents_R(fullPath.c_str(), "GAME", true))
@@ -419,6 +455,12 @@ bool WSCleanerPlugin::Unload(char *error, size_t maxlen)
 void WSCleanerPlugin::AllPluginsLoaded()
 {
 	g_pEngineServer->ServerCommand("exec wscleaner/wscleaner");
+
+	// Second so a saved exclude list wins over the hand-edited default.
+	if (g_pFullFileSystem && g_pFullFileSystem->FileExists(kExcludeCfgRelative, "GAME"))
+	{
+		g_pEngineServer->ServerCommand(kExcludeCfgExec);
+	}
 }
 
 void WSCleanerPlugin::OnLevelInit(char const *pMapName, 
@@ -515,9 +557,12 @@ CON_COMMAND_F(wscleaner_exclude_add, "Add an addon to the addon whitelist", FCVA
 	if (wscleaner_exclude.Get()[0] == '\0')
 	{
 		wscleaner_exclude.Set(args[1]);
-		return;
 	}
-	wscleaner_exclude.Set(wscleaner_exclude.Get() + "," + args[1]);
+	else
+	{
+		wscleaner_exclude.Set(wscleaner_exclude.Get() + "," + args[1]);
+	}
+	WSCleaner_SaveExclude();
 }
 
 CON_COMMAND_F(wscleaner_exclude_remove, "Remove an addon from the addon whitelist", FCVAR_NONE)
@@ -551,6 +596,7 @@ CON_COMMAND_F(wscleaner_exclude_remove, "Remove an addon from the addon whitelis
 			newValue += id;
 		}
 		wscleaner_exclude.Set(newValue.c_str());
+		WSCleaner_SaveExclude();
 	}
 	else
 	{
