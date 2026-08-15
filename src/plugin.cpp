@@ -190,6 +190,16 @@ void GetDownloadedAddonList(std::set<uint64> &outList)
 	g_pFullFileSystem->FindClose(findHandle);
 }
 
+// Deleting the folder mid-transfer corrupts the download and leaves the ACF disagreeing with what is on disk.
+static bool IsAddonDownloading(uint64 addonID)
+{
+	if (!g_SteamAPI.SteamUGC())
+		return false;
+
+	uint32 state = g_SteamAPI.SteamUGC()->GetItemState(addonID);
+	return (state & (k_EItemStateDownloading | k_EItemStateDownloadPending)) != 0;
+}
+
 int PruneStaleACFEntries()
 {
 	if (!g_pFullFileSystem)
@@ -220,6 +230,9 @@ int PruneStaleACFEntries()
 				continue;
 			uint64 id = strtoull(idStr, nullptr, 10);
 			if (id == 0)
+				continue;
+			// A queued download has an ACF entry before its folder exists.
+			if (IsAddonDownloading(id))
 				continue;
 			std::string folder = contentRoot + "/" + idStr;
 			if (!g_pFullFileSystem->IsDirectory(folder.c_str(), "GAME"))
@@ -434,10 +447,15 @@ void WSCleanerPlugin::DoCleanup()
 	std::set<uint64> downloadedAddons;
 	GetDownloadedAddonList(downloadedAddons);
 
+	auto shouldRemove = [&](uint64 addonID)
+	{
+		return whitelistedAddons.find(addonID) == whitelistedAddons.end() && !IsAddonDownloading(addonID);
+	};
+
 	bool willRemoveAny = false;
 	for (const auto &addonID : downloadedAddons)
 	{
-		if (whitelistedAddons.find(addonID) == whitelistedAddons.end())
+		if (shouldRemove(addonID))
 		{
 			willRemoveAny = true;
 			break;
@@ -449,10 +467,16 @@ void WSCleanerPlugin::DoCleanup()
 	WSCleaner_DumpSnapshots("before cleanup");
 	for (const auto &addonID : downloadedAddons)
 	{
-		if (whitelistedAddons.find(addonID) == whitelistedAddons.end())
+		if (whitelistedAddons.find(addonID) != whitelistedAddons.end())
+			continue;
+
+		if (IsAddonDownloading(addonID))
 		{
-			RemoveAddon(addonID);
+			META_CONPRINTF("[WSCleaner] Keeping addon %llu: download in progress.\n", addonID);
+			continue;
 		}
+
+		RemoveAddon(addonID);
 	}
 	WSCleaner_DumpSnapshots("after cleanup");
 }
