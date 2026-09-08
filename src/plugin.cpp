@@ -9,7 +9,6 @@
 #include "icommandline.h"
 #include "KeyValues.h"
 
-SH_DECL_HOOK0_void(IServerGameDLL, GameServerSteamAPIActivated, SH_NOATTRIB, 0);
 CSteamGameServerAPIContext g_SteamAPI;
 WSCleanerPlugin g_ThisPlugin;
 PLUGIN_EXPOSE(WSCleanerPlugin, g_ThisPlugin);
@@ -423,6 +422,12 @@ void GetWhitelistedAddons(std::set<uint64> &outList)
 }
 
 
+WSCleanerPlugin::WSCleanerPlugin()
+	: m_GameServerSteamAPIActivated(&ISource2Server::GameServerSteamAPIActivated, this, nullptr,
+									&WSCleanerPlugin::Hook_GameServerSteamAPIActivated)
+{
+}
+
 bool WSCleanerPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, bool late)
 {
 	PLUGIN_SAVEVARS();
@@ -442,13 +447,13 @@ bool WSCleanerPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxle
 		g_SteamAPI.Init();
 	ConVar_Register();
 
-	SH_ADD_HOOK(IServerGameDLL, GameServerSteamAPIActivated, g_pSource2Server, SH_MEMBER(this, &WSCleanerPlugin::Hook_GameServerSteamAPIActivated), false);
+	m_GameServerSteamAPIActivated.Add(g_pSource2Server);
 	return true;
 }
 
 bool WSCleanerPlugin::Unload(char *error, size_t maxlen)
 {
-	SH_REMOVE_HOOK(IServerGameDLL, GameServerSteamAPIActivated, g_pSource2Server, SH_MEMBER(this, &WSCleanerPlugin::Hook_GameServerSteamAPIActivated), false);
+	m_GameServerSteamAPIActivated.Remove(g_pSource2Server);
 	return true;
 }
 
@@ -523,11 +528,12 @@ void WSCleanerPlugin::DoCleanup()
 	WSCleaner_DumpSnapshots("after cleanup");
 }
 
-void WSCleanerPlugin::Hook_GameServerSteamAPIActivated()
+KHook::Return<void> WSCleanerPlugin::Hook_GameServerSteamAPIActivated(ISource2Server *)
 {
 	if (g_SteamAPI.SteamUGC())
-		return;
+		return {KHook::Action::Ignore};
 	g_SteamAPI.Init();
+	return {KHook::Action::Ignore};
 }
 
 CON_COMMAND_F(wscleaner_clean, "Manually clean unused workshop addons now.", FCVAR_NONE)

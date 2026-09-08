@@ -3,7 +3,6 @@
 
 #include <ISmmPlugin.h>
 #include <igameevents.h>
-#include <sh_vector.h>
 #include "version_gen.h"
 #include "steam/isteamugc.h"
 
@@ -11,6 +10,8 @@
 class WSCleanerPlugin : public ISmmPlugin, public IMetamodListener
 {
 public:
+	WSCleanerPlugin();
+
 	bool Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, bool late);
 	bool Unload(char *error, size_t maxlen);
 	void AllPluginsLoaded();
@@ -21,7 +22,7 @@ public:
 						bool loadGame, 
 						bool background);
 
-	void Hook_GameServerSteamAPIActivated();
+	KHook::Return<void> Hook_GameServerSteamAPIActivated(ISource2Server *);
 
 	void DoCleanup();
 public:
@@ -33,6 +34,9 @@ public:
 	const char *GetVersion() { return PLUGIN_FULL_VERSION; }
 	const char *GetDate() { return __DATE__; }
 	const char *GetLogTag() { return PLUGIN_LOGTAG; }
+
+private:
+	KHook::Virtual<ISource2Server, void> m_GameServerSteamAPIActivated;
 };
 
 extern WSCleanerPlugin g_ThisPlugin;
