@@ -23,8 +23,11 @@ public:
 						bool background);
 
 	KHook::Return<void> Hook_GameServerSteamAPIActivated(ISource2Server *);
+	KHook::Return<void> Hook_GameFrame(ISource2Server *, bool simulating, bool bFirstTick, bool bLastTick);
+	KHook::Return<void> Hook_ServerHibernationUpdate(ISource2Server *, bool bHibernating);
 
 	void DoCleanup();
+	void RunPendingCleanup();
 public:
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }
 	const char *GetName() { return PLUGIN_DISPLAY_NAME; }
@@ -37,6 +40,9 @@ public:
 
 private:
 	KHook::Virtual<ISource2Server, void> m_GameServerSteamAPIActivated;
+	KHook::Virtual<ISource2Server, void, bool, bool, bool> m_GameFrame;
+	KHook::Virtual<ISource2Server, void, bool> m_ServerHibernationUpdate;
+	bool m_bCleanupPending = false;
 };
 
 extern WSCleanerPlugin g_ThisPlugin;

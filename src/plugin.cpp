@@ -424,7 +424,10 @@ void GetWhitelistedAddons(std::set<uint64> &outList)
 
 WSCleanerPlugin::WSCleanerPlugin()
 	: m_GameServerSteamAPIActivated(&ISource2Server::GameServerSteamAPIActivated, this, nullptr,
-									&WSCleanerPlugin::Hook_GameServerSteamAPIActivated)
+									&WSCleanerPlugin::Hook_GameServerSteamAPIActivated),
+	  m_GameFrame(&ISource2Server::GameFrame, this, nullptr, &WSCleanerPlugin::Hook_GameFrame),
+	  m_ServerHibernationUpdate(&ISource2Server::ServerHibernationUpdate, this, nullptr,
+								&WSCleanerPlugin::Hook_ServerHibernationUpdate)
 {
 }
 
@@ -448,12 +451,16 @@ bool WSCleanerPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxle
 	ConVar_Register();
 
 	m_GameServerSteamAPIActivated.Add(g_pSource2Server);
+	m_GameFrame.Add(g_pSource2Server);
+	m_ServerHibernationUpdate.Add(g_pSource2Server);
 	return true;
 }
 
 bool WSCleanerPlugin::Unload(char *error, size_t maxlen)
 {
 	m_GameServerSteamAPIActivated.Remove(g_pSource2Server);
+	m_GameFrame.Remove(g_pSource2Server);
+	m_ServerHibernationUpdate.Remove(g_pSource2Server);
 	return true;
 }
 
@@ -475,9 +482,30 @@ void WSCleanerPlugin::OnLevelInit(char const *pMapName,
 							bool loadGame, 
 							bool background) 
 {
-	DoCleanup();
+	// Engine addon list may be half-built here; GetAddon() crashes. Defer to first frame.
+	m_bCleanupPending = true;
+}
 
+void WSCleanerPlugin::RunPendingCleanup()
+{
+	if (!m_bCleanupPending)
+		return;
+	m_bCleanupPending = false;
+	DoCleanup();
 	PruneStaleACFEntries();
+}
+
+KHook::Return<void> WSCleanerPlugin::Hook_GameFrame(ISource2Server *, bool simulating, bool bFirstTick, bool bLastTick)
+{
+	RunPendingCleanup();
+	return {KHook::Action::Ignore};
+}
+
+// Empty servers hibernate and stop calling GameFrame.
+KHook::Return<void> WSCleanerPlugin::Hook_ServerHibernationUpdate(ISource2Server *, bool bHibernating)
+{
+	RunPendingCleanup();
+	return {KHook::Action::Ignore};
 }
 
 void WSCleanerPlugin::DoCleanup()
