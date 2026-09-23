@@ -3,9 +3,9 @@
     "alias": "wscleaner",
     "display_name": "Workshop Cleaner",
     "description": "Deletes unneeded workshop files from the server to save disk space.",
-    "author": "zer0.k",
+    "author": "zer0.k, FKZ fork",
     "url": "https://github.com/zer0k-z",
     "log_tag": "WSCleaner",
     "license": "AGPLv3",
-    "version": "1.0.0.{{git-shorthash}}"
+    "version": "1.0.1.{{git-shorthash}}"
 }
