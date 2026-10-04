@@ -1,4 +1,7 @@
-#include "plugin.h"
+#include <ISmmPlugin.h>
+#include "eiface.h"
+#include "interfaces/interfaces.h"
+#include "steam/isteamugc.h"
 #include "workshop_manager.h"
 #include "rtti.h"
 #include "tier1/utlmap.h"
@@ -53,6 +56,8 @@ static_assert(offsetof(RequestedMap_t, m_details.m_rtimeUpdated) == 8180, "Reque
 static_assert(offsetof(CDedicatedServerWorkshopManager, m_mapLoadedWorkshopMaps) == 0x98, "workshop manager layout drifted");
 static_assert(offsetof(CDedicatedServerWorkshopManager, m_nRequestedSharedFileId) == 0xE8, "workshop manager layout drifted");
 static_assert(sizeof(CDedicatedServerWorkshopManager) == 0x100, "workshop manager layout drifted");
+
+PLUGIN_GLOBALVARS();
 
 static CDedicatedServerWorkshopManager *GetWorkshopManager()
 {
@@ -115,4 +120,17 @@ void ForgetWorkshopManagerMap(uint64 addonID)
 	loaded.RemoveAt(index);
 	delete pInfo;
 	META_CONPRINTF("[WSCleaner] Removed addon from workshop manager: %llu\n", addonID);
+}
+
+bool IsWorkshopManagerRequestPending(uint64 addonID)
+{
+	CDedicatedServerWorkshopManager *pManager = GetWorkshopManager();
+	if (!pManager)
+		return false;
+	return pManager->m_requestedMaps.Find(addonID) != pManager->m_requestedMaps.InvalidIndex();
+}
+
+bool IsWorkshopManagerAvailable()
+{
+	return GetWorkshopManager() != nullptr;
 }

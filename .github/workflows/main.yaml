@@ -66,15 +66,13 @@ jobs:
         run: |
           mkdir /home/runner/releases
 
-      - name: Archive Linux build
+      - name: Archive builds
         run: |
-          cd /home/runner/artifacts/wscleaner-Linux
-          tar -czvf /home/runner/releases/wscleaner-linux.tar.gz *
-
-      - name: Archive Windows build
-        run: |
-          cd /home/runner/artifacts/wscleaner-Windows
-          zip -r /home/runner/releases/wscleaner-windows.zip *
+          # Every plugin has its own folder in the package, and each one is released on its own.
+          for plugin in wscleaner wshostmap; do
+            (cd /home/runner/artifacts/wscleaner-Linux/$plugin && tar -czvf /home/runner/releases/$plugin-linux.tar.gz *)
+            (cd /home/runner/artifacts/wscleaner-Windows/$plugin && zip -r /home/runner/releases/$plugin-windows.zip *)
+          done
 
       - name: Create Tag
         id: create_tag
@@ -91,5 +89,7 @@ jobs:
           files: |
             /home/runner/releases/wscleaner-linux.tar.gz
             /home/runner/releases/wscleaner-windows.zip
+            /home/runner/releases/wshostmap-linux.tar.gz
+            /home/runner/releases/wshostmap-windows.zip
           generate_release_notes: false
           prerelease: false

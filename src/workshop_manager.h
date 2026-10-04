@@ -14,4 +14,10 @@ void GetWorkshopManagerBusyAddons(std::set<uint64> &outList);
 // Drop the manager's record of a loaded workshop map that is about to be deleted from disk.
 void ForgetWorkshopManagerMap(uint64 addonID);
 
+// True while the manager is still querying, downloading or installing the addon. Once it finishes, successfully or
+// not, the request is dropped and the manager changes to the map if it was the one requested by host_workshop_map.
+bool IsWorkshopManagerRequestPending(uint64 addonID);
+
+bool IsWorkshopManagerAvailable();
+
 #endif // _INCLUDE_WSCLEANER_WORKSHOP_MANAGER_H_

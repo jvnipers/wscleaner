@@ -1,25 +1,37 @@
-# vim: set ts=2 sw=2 tw=99 noet ft=python: 
+# vim: set ts=2 sw=2 tw=99 noet ft=python:
 import os
 
 builder.SetBuildFolder('package')
 
-metamod_folder = builder.AddFolder(os.path.join('addons', 'metamod'))
-bin_folder_path = os.path.join('addons', MMSPlugin.metadata['name'], 'bin')
-bin_folder = builder.AddFolder(bin_folder_path)
+# Each plugin gets its own self-contained tree under package/<plugin>/, released as a separate archive.
+def add_plugin(name, alias):
+  builder.AddFolder(os.path.join(name, 'addons', 'metamod'))
+  bin_folder_path = os.path.join('addons', name, 'bin')
+  builder.AddFolder(os.path.join(name, bin_folder_path))
 
-vdf_content = '"Metamod Plugin"\n'
-vdf_content += '{\n'
-vdf_content += f'\t"alias"\t"{MMSPlugin.metadata["alias"]}"\n'
-vdf_content += f'\t"file"\t"{os.path.join(bin_folder_path, MMSPlugin.metadata["name"])}"\n'
-vdf_content += '}\n'
-builder.AddOutputFile(os.path.join('addons', 'metamod', f'{MMSPlugin.metadata["name"]}.vdf'), vdf_content.encode('utf8'))
+  vdf_content = '"Metamod Plugin"\n'
+  vdf_content += '{\n'
+  vdf_content += f'\t"alias"\t"{alias}"\n'
+  vdf_content += f'\t"file"\t"{os.path.join(bin_folder_path, name)}"\n'
+  vdf_content += '}\n'
+  builder.AddOutputFile(os.path.join(name, 'addons', 'metamod', f'{name}.vdf'), vdf_content.encode('utf8'))
+
+  cfg_path = os.path.join(builder.sourcePath, 'cfg', name, name + '.cfg')
+  if os.path.exists(cfg_path):
+    builder.AddCopy(cfg_path, builder.AddFolder(os.path.join(name, 'cfg', name)))
+
+  return bin_folder_path
 
 pdb_list = []
 for task in MMSPlugin.tasks:
+  # Binaries are named <plugin>.<sdk>.<ext>.
   # This hardly assumes there's only 1 targetted platform and would be overwritten
   # with whatever comes last if multiple are used!
+  plugin_name = os.path.basename(task.binary.path).split('.')[0]
+  alias = MMSPlugin.metadata['alias'] if plugin_name == MMSPlugin.metadata['name'] else plugin_name
+  bin_folder_path = add_plugin(plugin_name, alias)
   plugin_bin_ext = os.path.splitext(task.binary.path)[1]
-  builder.AddCopy(task.binary, os.path.join(bin_folder_path, MMSPlugin.metadata['name'] + plugin_bin_ext))
+  builder.AddCopy(task.binary, os.path.join(plugin_name, bin_folder_path, plugin_name + plugin_bin_ext))
 
   if task.debug:
     pdb_list.append(task.debug)
@@ -28,6 +40,3 @@ for task in MMSPlugin.tasks:
 with open(os.path.join(builder.buildPath, 'pdblog.txt'), 'wt') as fp:
   for line in pdb_list:
     fp.write(line.path + '\n')
-
-cfg_folder = builder.AddFolder(os.path.join('cfg', MMSPlugin.metadata['name']))
-builder.AddCopy(os.path.join(builder.sourcePath, 'cfg', MMSPlugin.metadata['name'], MMSPlugin.metadata['name'] + '.cfg'), cfg_folder)

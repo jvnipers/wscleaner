@@ -1,28 +1,40 @@
-# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python: 
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
 import os
 
-project = builder.LibraryProject(MMSPlugin.metadata["name"])
-
-for sdk_target in MMSPlugin.sdk_targets:
-  sdk = sdk_target.sdk
-  cxx = sdk_target.cxx
-
-  binary = MMSPlugin.HL2Library(builder, cxx, project, sdk)
-
-  binary.sources += [
+# Each entry is a separate Metamod plugin. wshostmap is optional: server owners install it only if they want
+# players to host workshop maps from chat.
+plugins = {
+  MMSPlugin.metadata["name"]: [
     'src/plugin.cpp',
     'src/addons.cpp',
     'src/workshop_manager.cpp',
     'src/rtti.cpp',
-  ]
+  ],
+  'wshostmap': [
+    'src/hostmap.cpp',
+    'src/workshop_manager.cpp',
+    'src/rtti.cpp',
+  ],
+}
 
-  binary.custom = [builder.tools.Protoc(protoc = sdk_target.protoc, sources = [
-    os.path.join(sdk['path'], 'common', 'network_connection.proto'),
-  ])]
+for name, sources in plugins.items():
+  project = builder.LibraryProject(name)
 
-  if binary.compiler.target.platform == 'windows':
-    binary.compiler.postlink += [
-      os.path.join(sdk['path'], 'lib', 'public', 'win64', 'steam_api64.lib')
-    ]
+  for sdk_target in MMSPlugin.sdk_targets:
+    sdk = sdk_target.sdk
+    cxx = sdk_target.cxx
 
-MMSPlugin.tasks += builder.Add(project)
+    binary = MMSPlugin.HL2Library(builder, cxx, project, sdk)
+
+    binary.sources += sources
+
+    binary.custom = [builder.tools.Protoc(protoc = sdk_target.protoc, sources = [
+      os.path.join(sdk['path'], 'common', 'network_connection.proto'),
+    ])]
+
+    if binary.compiler.target.platform == 'windows':
+      binary.compiler.postlink += [
+        os.path.join(sdk['path'], 'lib', 'public', 'win64', 'steam_api64.lib')
+      ]
+
+  MMSPlugin.tasks += builder.Add(project)
