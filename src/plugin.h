@@ -25,6 +25,7 @@ public:
 						bool background);
 
 	KHook::Return<void> Hook_GameServerSteamAPIActivated(IServerGameDLL*);
+	KHook::Return<void> Hook_GameFrame(IServerGameDLL*, bool simulating, bool bFirstTick, bool bLastTick);
 public:
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }
 	const char *GetName() { return PLUGIN_DISPLAY_NAME; }
@@ -36,6 +37,7 @@ public:
 	const char *GetLogTag() { return PLUGIN_LOGTAG; }
 protected:
 	KHook::Virtual<IServerGameDLL, void> m_GameServerSteamAPIActivated;
+	KHook::Virtual<IServerGameDLL, void, bool, bool, bool> m_GameFrame;
 };
 
 extern WSCleanerPlugin g_ThisPlugin;

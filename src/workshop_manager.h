@@ -11,6 +11,9 @@
 // Addons the manager is downloading, about to host, or needs for the collection it is hosting.
 void GetWorkshopManagerBusyAddons(std::set<uint64> &outList);
 
+// Addons the manager has as loaded maps, the ones ds_workshop_listmaps prints.
+void GetWorkshopManagerLoadedAddons(std::set<uint64> &outList);
+
 // Drop the manager's record of a loaded workshop map that is about to be deleted from disk.
 void ForgetWorkshopManagerMap(uint64 addonID);
 
@@ -19,5 +22,8 @@ void ForgetWorkshopManagerMap(uint64 addonID);
 bool IsWorkshopManagerRequestPending(uint64 addonID);
 
 bool IsWorkshopManagerAvailable();
+
+// Addon id of a workshop map the manager has loaded, looked up by map name, or 0.
+uint64 FindWorkshopManagerMapAddon(const char *mapName);
 
 #endif // _INCLUDE_WSCLEANER_WORKSHOP_MANAGER_H_

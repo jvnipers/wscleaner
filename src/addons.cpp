@@ -8,16 +8,26 @@
 
 CConVar<CUtlString> wscleaner_exclude("wscleaner_exclude", FCVAR_NONE, "Comma-separated list of addons that will not be deleted by the plugin.", "");
 
+static std::string GetWorkshopRoot()
+{
+	char szAbsolutePath[1024];
+	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop");
+	return szAbsolutePath;
+}
+
+static std::string GetAddonFolder(uint64 addonID)
+{
+	return GetWorkshopRoot() + "/content/730/" + std::to_string(addonID);
+}
+
 static void GetDownloadedAddonList(std::set<uint64> &outList)
 {
 	outList.clear();
 	if (!g_pFullFileSystem)
 		return;
 
-	char szAbsolutePath[1024];
-	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop\\content\\730");
 	// Loop through all the directories in the workshop folder
-	std::string searchPath = std::string(szAbsolutePath) + "/*";
+	std::string searchPath = GetWorkshopRoot() + "/content/730/*";
 	FileFindHandle_t findHandle = {};
 	const char *fileName = g_pFullFileSystem->FindFirstEx(searchPath.c_str(), "GAME", &findHandle);
 	while (fileName)
@@ -35,48 +45,81 @@ static void GetDownloadedAddonList(std::set<uint64> &outList)
 	g_pFullFileSystem->FindClose(findHandle);
 }
 
-// Remove the addon with the given ID from the workshop folder and from the acf file. The caller reloads Steam's workshop state afterwards.
-static void RemoveAddon(uint64 addonID)
+// Whether the addon's folder holds a vpk the engine could mount.
+static bool AddonFolderHasVPK(uint64 addonID)
 {
-	if (!g_pFullFileSystem)
-		return;
-	ForgetWorkshopManagerMap(addonID);
+	std::string searchPath = GetAddonFolder(addonID) + "/*.vpk";
+	FileFindHandle_t findHandle = {};
+	bool found = g_pFullFileSystem->FindFirstEx(searchPath.c_str(), "GAME", &findHandle) != nullptr;
+	g_pFullFileSystem->FindClose(findHandle);
+	return found;
+}
 
-	char szAbsolutePath[1024];
-	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop");
-	char addonIDStr[32];
-	V_snprintf(addonIDStr, sizeof(addonIDStr), "%llu", addonID);
-	std::string fullPath = std::string(szAbsolutePath) + "/content/730/" + addonIDStr;
-	if (g_pFullFileSystem->IsDirectory(fullPath.c_str(), "GAME"))
+static bool DeleteAddonFolder(uint64 addonID)
+{
+	std::string folder = GetAddonFolder(addonID);
+	if (!g_pFullFileSystem->IsDirectory(folder.c_str(), "GAME"))
+		return false;
+	if (!g_pFullFileSystem->DeleteDirectoryAndContents_R(folder.c_str(), "GAME", true))
 	{
-		if (g_pFullFileSystem->DeleteDirectoryAndContents_R(fullPath.c_str(), "GAME", true))
-		{
-			META_CONPRINTF("[WSCleaner] Removed addon: %llu\n", addonID);
-		}
-		else
-		{
-			META_CONPRINTF("[WSCleaner] Failed to remove addon: %llu\n", addonID);
-		}
+		META_CONPRINTF("[WSCleaner] Failed to remove addon: %llu\n", addonID);
+		return false;
 	}
+	META_CONPRINTF("[WSCleaner] Removed addon: %llu\n", addonID);
+	return true;
+}
 
-	// Now update the acf file to remove the entry for this addon
-	KeyValues *pACF = new KeyValues("AppWorkshop");
-	std::string acfPath = std::string(szAbsolutePath) + "/appworkshop_730.acf";
-	if (pACF->LoadFromFile(g_pFullFileSystem, acfPath.c_str(), "GAME"))
+static std::string GetACFPath()
+{
+	return GetWorkshopRoot() + "/appworkshop_730.acf";
+}
+
+// Addons Steam's acf lists as installed.
+static void GetACFInstalledAddons(std::set<uint64> &outList)
+{
+	KeyValues::AutoDelete pACF("AppWorkshop");
+	if (!pACF->LoadFromFile(g_pFullFileSystem, GetACFPath().c_str(), "GAME"))
+		return;
+	KeyValues *pInstalledItems = pACF->FindKey("WorkshopItemsInstalled");
+	if (!pInstalledItems)
+		return;
+	for (KeyValues *pItem = pInstalledItems->GetFirstSubKey(); pItem; pItem = pItem->GetNextKey())
 	{
+		uint64 addonID = strtoull(pItem->GetName(), nullptr, 10);
+		if (addonID != 0)
+			outList.insert(addonID);
+	}
+}
+
+// Drop the addons from the acf. Returns whether the file changed.
+static bool PruneACF(const std::set<uint64> &addons)
+{
+	if (addons.empty())
+		return false;
+	KeyValues::AutoDelete pACF("AppWorkshop");
+	std::string acfPath = GetACFPath();
+	if (!pACF->LoadFromFile(g_pFullFileSystem, acfPath.c_str(), "GAME"))
+		return false;
+	bool changed = false;
+	for (uint64 addonID : addons)
+	{
+		std::string addonIDStr = std::to_string(addonID);
 		KeyValues *pInstalledItems = pACF->FindKey("WorkshopItemsInstalled");
-		if (pInstalledItems && pInstalledItems->FindAndDeleteSubKey(addonIDStr))
+		if (pInstalledItems && pInstalledItems->FindAndDeleteSubKey(addonIDStr.c_str()))
 		{
 			META_CONPRINTF("[WSCleaner] Removed entry from ACF for addon: %llu\n", addonID);
+			changed = true;
 		}
 		KeyValues *pItemDetails = pACF->FindKey("WorkshopItemDetails");
-		if (pItemDetails && pItemDetails->FindAndDeleteSubKey(addonIDStr))
+		if (pItemDetails && pItemDetails->FindAndDeleteSubKey(addonIDStr.c_str()))
 		{
 			META_CONPRINTF("[WSCleaner] Removed details from ACF for addon: %llu\n", addonID);
+			changed = true;
 		}
-		pACF->SaveToFile(g_pFullFileSystem, acfPath.c_str(), "GAME");
 	}
-	delete pACF;
+	if (changed)
+		pACF->SaveToFile(g_pFullFileSystem, acfPath.c_str(), "GAME");
+	return changed;
 }
 
 static void ExtractValuesAfterKeyword(const std::string& str, const std::string& keyword, std::set<std::string>& results)
@@ -125,9 +168,14 @@ static void ExtractValuesAfterKeyword(const std::string& str, const std::string&
 	}
 }
 
-static void GetWhitelistedAddons(std::set<uint64> &outList)
+static void GetWhitelistedAddons(const char *currentMap, std::set<uint64> &outList)
 {
 	outList.clear();
+	// The addon the running map comes from, in case it is missing from the engine's addon list.
+	uint64 currentMapAddon = FindWorkshopManagerMapAddon(currentMap);
+	if (currentMapAddon != 0)
+		outList.insert(currentMapAddon);
+
 	// Do not remove currently loaded addons.
 	int numAddons = g_pEngineServiceMgr->GetAddonCount();
 	for (int i = 0; i < numAddons; ++i)
@@ -163,18 +211,24 @@ static void GetWhitelistedAddons(std::set<uint64> &outList)
 	}
 }
 
-void CleanupWorkshopAddons()
+void CleanupWorkshopAddons(const char *currentMap)
 {
 	ISteamUGC *pUGC = g_SteamAPI.SteamUGC();
-	if (!pUGC)
+	if (!pUGC || !g_pFullFileSystem)
 		return;
 
 	std::set<uint64> downloadedAddons;
 	GetDownloadedAddonList(downloadedAddons);
+	// Everything something believes is installed: Steam's acf and the workshop manager's loaded maps.
+	std::set<uint64> listedAddons;
+	GetACFInstalledAddons(listedAddons);
+	GetWorkshopManagerLoadedAddons(listedAddons);
 
 	// Steam refuses BInitWorkshopForGameServer while its workshop download job for the app is running, and that job
 	// writes its in-memory item list back to the acf when it finishes, which would undo the cleanup. Retry next level.
-	for (const auto &addonID : downloadedAddons)
+	std::set<uint64> knownAddons = downloadedAddons;
+	knownAddons.insert(listedAddons.begin(), listedAddons.end());
+	for (const auto &addonID : knownAddons)
 	{
 		if (pUGC->GetItemState(addonID) & (k_EItemStateDownloading | k_EItemStateDownloadPending))
 		{
@@ -184,25 +238,39 @@ void CleanupWorkshopAddons()
 	}
 
 	std::set<uint64> whitelistedAddons;
-	GetWhitelistedAddons(whitelistedAddons);
-	bool removedAny = false;
+	GetWhitelistedAddons(currentMap, whitelistedAddons);
+	std::set<uint64> droppedAddons;
 	for (const auto &addonID : downloadedAddons)
 	{
 		if (whitelistedAddons.find(addonID) == whitelistedAddons.end())
 		{
-			RemoveAddon(addonID);
-			removedAny = true;
+			DeleteAddonFolder(addonID);
+			droppedAddons.insert(addonID);
 		}
 	}
-	if (!removedAny)
+
+	// Repair addons that are listed as installed but have nothing mountable on disk, for example after the server
+	// died halfway through a cleanup. Left alone, Steam keeps reporting them as installed, the workshop manager skips
+	// the download, and hosting them lands on the error map. Only a request the manager is still working on is spared.
+	for (const auto &addonID : knownAddons)
+	{
+		if (droppedAddons.count(addonID) || IsWorkshopManagerRequestPending(addonID) || AddonFolderHasVPK(addonID))
+			continue;
+		META_CONPRINTF("[WSCleaner] Addon %llu is listed as installed but has no files, dropping it.\n", addonID);
+		DeleteAddonFolder(addonID);
+		droppedAddons.insert(addonID);
+	}
+	if (droppedAddons.empty())
 		return;
 
+	for (const auto &addonID : droppedAddons)
+		ForgetWorkshopManagerMap(addonID);
+	PruneACF(droppedAddons);
+
 	// Steam keeps its own copy of the acf in memory, which GetItemState and GetItemInstallInfo answer from, and the
-	// workshop manager trusts those answers. Reload it once so Steam forgets the deleted items and downloads them
+	// workshop manager trusts those answers. Reload it once so Steam forgets the dropped items and downloads them
 	// again when they are next requested.
-	char szAbsolutePath[1024];
-	V_MakeAbsolutePath(szAbsolutePath, sizeof(szAbsolutePath), ".\\steamapps\\workshop");
-	if (!pUGC->BInitWorkshopForGameServer(730, szAbsolutePath))
+	if (!pUGC->BInitWorkshopForGameServer(730, GetWorkshopRoot().c_str()))
 		META_CONPRINTF("[WSCleaner] Steam refused to reload workshop state, removed addons may still be reported as installed.\n");
 }
 

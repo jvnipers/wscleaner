@@ -105,6 +105,19 @@ void GetWorkshopManagerBusyAddons(std::set<uint64> &outList)
 		outList.insert(pManager->m_nRequestedSharedFileId);
 }
 
+void GetWorkshopManagerLoadedAddons(std::set<uint64> &outList)
+{
+	CDedicatedServerWorkshopManager *pManager = GetWorkshopManager();
+	if (!pManager)
+		return;
+	const WorkshopLoadedMap_t &loaded = pManager->m_mapLoadedWorkshopMaps;
+	for (int i = 0; i < loaded.MaxElement(); ++i)
+	{
+		if (loaded.IsValidIndex(i))
+			outList.insert(loaded.Key(i));
+	}
+}
+
 void ForgetWorkshopManagerMap(uint64 addonID)
 {
 	CDedicatedServerWorkshopManager *pManager = GetWorkshopManager();
@@ -133,4 +146,18 @@ bool IsWorkshopManagerRequestPending(uint64 addonID)
 bool IsWorkshopManagerAvailable()
 {
 	return GetWorkshopManager() != nullptr;
+}
+
+uint64 FindWorkshopManagerMapAddon(const char *mapName)
+{
+	CDedicatedServerWorkshopManager *pManager = GetWorkshopManager();
+	if (!pManager || !mapName || !mapName[0])
+		return 0;
+	const WorkshopLoadedMap_t &loaded = pManager->m_mapLoadedWorkshopMaps;
+	for (int i = 0; i < loaded.MaxElement(); ++i)
+	{
+		if (loaded.IsValidIndex(i) && loaded.Element(i) && V_stricmp(loaded.Element(i)->m_szMapName.Get(), mapName) == 0)
+			return loaded.Key(i);
+	}
+	return 0;
 }
