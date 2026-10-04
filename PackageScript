@@ -7,23 +7,22 @@ metamod_folder = builder.AddFolder(os.path.join('addons', 'metamod'))
 bin_folder_path = os.path.join('addons', MMSPlugin.metadata['name'], 'bin')
 bin_folder = builder.AddFolder(bin_folder_path)
 
+vdf_content = '"Metamod Plugin"\n'
+vdf_content += '{\n'
+vdf_content += f'\t"alias"\t"{MMSPlugin.metadata["alias"]}"\n'
+vdf_content += f'\t"file"\t"{os.path.join(bin_folder_path, MMSPlugin.metadata["name"])}"\n'
+vdf_content += '}\n'
+builder.AddOutputFile(os.path.join('addons', 'metamod', f'{MMSPlugin.metadata["name"]}.vdf'), vdf_content.encode('utf8'))
+
 pdb_list = []
-for task in MMSPlugin.binaries:
+for task in MMSPlugin.tasks:
   # This hardly assumes there's only 1 targetted platform and would be overwritten
   # with whatever comes last if multiple are used!
-  with open(os.path.join(builder.buildPath, MMSPlugin.metadata['name'] + '.vdf'), 'w') as fp:
-    fp.write('"Metamod Plugin"\n')
-    fp.write('{\n')
-    fp.write(f'\t"alias"\t"{MMSPlugin.metadata["alias"]}"\n')
-    fp.write(f'\t"file"\t"{os.path.join(bin_folder_path, MMSPlugin.metadata["name"])}"\n')
-    fp.write('}\n')
-
-    builder.AddCopy(task.binary, bin_folder)
+  plugin_bin_ext = os.path.splitext(task.binary.path)[1]
+  builder.AddCopy(task.binary, os.path.join(bin_folder_path, MMSPlugin.metadata['name'] + plugin_bin_ext))
 
   if task.debug:
     pdb_list.append(task.debug)
-
-builder.AddCopy(os.path.join(builder.buildPath, MMSPlugin.metadata['name'] + '.vdf'), metamod_folder)
 
 # Generate PDB info.
 with open(os.path.join(builder.buildPath, 'pdblog.txt'), 'wt') as fp:

@@ -1,6 +1,7 @@
 # vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
-import os, json, re, subprocess
+import os, json, re, subprocess, shutil, sys
 from ambuild2.frontend.v2_2.cpp.builders import TargetSuffix
+from ambuild2.util import ConsoleRed, ConsoleNormal
 
 # Edit the functions below for the extra functionality, the return should be
 # a list of path's to wanted locations
@@ -22,6 +23,12 @@ def additionalIncludes(context, binary, sdk):
     # os.path.join(sdk['path'], 'public', 'entity2'),
     # 'D:/absolute/path/to/include/folder/'
   ]
+
+def hasLLDLinker():
+  result = shutil.which('lld')
+  if not result:
+    result = shutil.which('ld.lld')
+  return result != None
 
 def getGitHeadPath():
   curr_source = builder.currentSourcePath
@@ -47,7 +54,7 @@ def runAndReturn(argv):
   output, ignored = p.communicate()
   rval = p.poll()
   if rval:
-    raise subprocess.CalledProcessError(rval, argv)
+    return None
   text = output.decode('utf8')
   return text.strip()
 
@@ -106,7 +113,7 @@ class MMSPluginConfig(object):
     self.sdk_manifests = []
     self.sdks = {}
     self.sdk_targets = []
-    self.binaries = []
+    self.tasks = []
     self.mms_root = mms_root
     self.version_header_deps = []
     self.versionlib_deps = dict()
@@ -165,10 +172,6 @@ class MMSPluginConfig(object):
     self.sdks = SdkHelpers.sdks
     self.sdk_manifests = SdkHelpers.sdk_manifests
     self.sdk_targets = SdkHelpers.sdk_targets
-
-    for sdk_target in self.sdk_targets:
-      if not sdk_target.sdk['source2']:
-        raise Exception('Only Source2 games are supported by this script.')
   
   def addVersioning(self, cxx):
     cxx.includes += [
@@ -227,10 +230,16 @@ extern const char* PLUGIN_REVISION_COUNT;
       builder.AddConfigureFile(git_head_path)
       builder.AddConfigureFile(direct_head)
 
-      runAndReturn(['git', 'config', '--global', '--add', 'safe.directory', builder.currentSourcePath])
+      tag = runAndReturn(['git', 'describe', '--tags']) or 'MISSING_TAG'
+      commits_after_tag = '0'
 
-      revision_count = runAndReturn(['git', 'rev-list', '--count', 'HEAD'])
-      revision_hash = runAndReturn(['git', 'log', '--pretty=format:%h:%H', '-n', '1'])
+      tag_match = re.match(r'(.+?)\-(\d+)\-g[a-f\d]+$', tag, re.MULTILINE)
+      if tag_match is not None:
+        tag = tag_match.group(1)
+        commits_after_tag = tag_match.group(2)
+
+      revision_count = runAndReturn(['git', 'rev-list', '--count', 'HEAD']) or 'MISSING_COUNT'
+      revision_hash = runAndReturn(['git', 'log', '--pretty=format:%h:%H', '-n', '1']) or 'MISSING_SHORTHASH:MISSING_LONGHASH'
       shorthash, longhash = revision_hash.split(':')
 
     if '{{git-shorthash}}' in version:
@@ -241,6 +250,12 @@ extern const char* PLUGIN_REVISION_COUNT;
 
     if '{{git-count}}' in version:
       version = version.replace('{{git-count}}', revision_count)
+
+    if '{{git-tag}}' in version:
+      version = version.replace('{{git-tag}}', tag)
+
+    if '{{git-commits-after-tag}}' in version:
+      version = version.replace('{{git-commits-after-tag}}', commits_after_tag)
 
     # For the version strings and git hashes compile that to a static library instead,
     # to prevent a full recompilation on version/git changes which would only trigger this cpp
@@ -313,6 +328,8 @@ const char *PLUGIN_REVISION_COUNT = \"{revision_count}\";
         '-Wno-uninitialized',
         '-Wno-unused',
         '-Wno-switch',
+        '-Wno-unknown-pragmas',
+        '-Wno-dangling-else',
         '-msse',
         '-fPIC',
       ]
@@ -416,24 +433,27 @@ const char *PLUGIN_REVISION_COUNT = \"{revision_count}\";
       elif cxx.family == 'clang':
         cxx.linkflags += ['-lgcc_eh']
       cxx.linkflags += ['-static-libstdc++']
+      
+      if hasLLDLinker():
+        # This prevents STB_GNU_UNIQUE symbols from appearing in resulting binary
+        # as these cause it to not unload on dlclose which metamod relies on to unload its plugins
+        # as a result this messes with static/global variable destruction & causes other various effects
+        # like server crashes on server exit
+        cxx.linkflags += ['-fuse-ld=lld', '-Wl,--no-gnu-unique']
+      
     elif cxx.target.platform == 'windows':
       cxx.defines += ['WIN32', '_WINDOWS']
-
-  def Library(self, cxx, name):
-    binary = cxx.Library(name)
-    return binary
   
-  def HL2Library(self, context, compiler, name, sdk):
-    binary = self.Library(compiler, name)
-    mms_core_path = os.path.join(self.mms_root, 'core')
+  def HL2Library(self, context, compiler, project, sdk):
+    binary = project.Configure(compiler, '{0}.{1}'.format(project.name, sdk['extension']), '{0} {1}'.format(sdk['name'], compiler.target.arch))
     cxx = binary.compiler
     
     self.addVersioning(cxx)
 
     cxx.cxxincludes += [
       os.path.join(context.currentSourcePath),
-      os.path.join(mms_core_path),
-      os.path.join(mms_core_path, 'sourcehook'),
+      os.path.join(self.mms_root, 'core'),
+      os.path.join(self.mms_root, 'third_party', 'khook', 'include')
     ]
 
     for other_sdk in self.sdk_manifests:
@@ -459,6 +479,13 @@ MMSPlugin = MMSPluginConfig()
 MMSPlugin.detectSDKs()
 MMSPlugin.configurePluginMetadata()
 MMSPlugin.configure()
+
+if os.name == 'posix' and not hasLLDLinker():
+  ConsoleRed(sys.stdout)
+  print('[!] LLD linker not found, using systems default.')
+  print('[!] This might result in a binary that is not unloadable at runtime and will potentially cause issues/crashes!')
+  print('[!] Please do install LLD linker for better binary stability. (apt install lld)')
+  ConsoleNormal(sys.stdout)
 
 BuildScripts = [
   'AMBuilder',
