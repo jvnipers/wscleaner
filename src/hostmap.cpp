@@ -4,11 +4,16 @@
 #include "hostmap.h"
 #include "workshop_manager.h"
 #include "icommandline.h"
+#include "engine/igameeventsystem.h"
+#include "networksystem/inetworkmessages.h"
+#include "networksystem/netmessage.h"
+#include "usermessages.pb.h"
 
 WSHostMapPlugin g_ThisPlugin;
 PLUGIN_EXPOSE(WSHostMapPlugin, g_ThisPlugin);
 
 static CSteamGameServerAPIContext s_SteamAPI;
+static IGameEventSystem *s_pGameEventSystem = nullptr;
 
 CConVar<float> wshostmap_progress_interval("wshostmap_progress_interval", FCVAR_NONE, "Seconds between download progress messages in chat.", 5.0f, true, 1.0f, false, 0.0f);
 
@@ -44,8 +49,8 @@ static void ResetRequest()
 	s_Request.title.clear();
 }
 
-// Print to every player's chat through the server's say command. Workshop titles and player names are user
-// controlled and end up on a console command line, so anything that could end the argument or the command goes.
+// Print to every player's chat as a plain TextMsg, prefixed with a green tag. Control characters are dropped so
+// workshop titles and player names cannot inject chat colours.
 static void ChatPrintAll(const char *format, ...)
 {
 	char message[256];
@@ -54,17 +59,23 @@ static void ChatPrintAll(const char *format, ...)
 	V_vsnprintf(message, sizeof(message), format, args);
 	va_end(args);
 
-	std::string safe;
+	// The leading space is needed for a colour code at the very start to be parsed.
+	std::string text = " \x04[HostMap]\x01 ";
 	for (const char *c = message; *c; ++c)
 	{
-		if (*c == '"')
-			safe += '\'';
-		else if (*c != ';' && (unsigned char)*c >= ' ')
-			safe += *c;
+		if ((unsigned char)*c >= ' ')
+			text += *c;
 	}
-	char command[300];
-	V_snprintf(command, sizeof(command), "say \"%s\"\n", safe.c_str());
-	g_pEngineServer->ServerCommand(command);
+
+	INetworkMessageInternal *pNetMsg = g_pNetworkMessages->FindNetworkMessagePartial("TextMsg");
+	if (!pNetMsg)
+		return;
+	CNetMessagePB<CUserMessageTextMsg> *pMsg = pNetMsg->AllocateMessage()->ToPB<CUserMessageTextMsg>();
+	pMsg->set_dest(3); // HUD_PRINTTALK
+	pMsg->add_param(text);
+	// A client count of -1 with no client mask posts to every connected client.
+	s_pGameEventSystem->PostEventAbstract(-1, false, -1, nullptr, pNetMsg, pMsg, 0, BUF_RELIABLE);
+	delete pMsg;
 }
 
 static std::string FormatSize(uint64 bytes)
@@ -106,19 +117,19 @@ static void StartRequest(CPlayerSlot slot, const char *arguments)
 {
 	if (s_Request.state != EHostState::Idle)
 	{
-		ChatPrintAll("[HostMap] Already working on workshop map %llu, try again once it is loaded.", s_Request.fileId);
+		ChatPrintAll("Already working on workshop map %llu, try again once it is loaded.", s_Request.fileId);
 		return;
 	}
 	PublishedFileId_t fileId = ParseFileId(arguments);
 	if (fileId == 0)
 	{
-		ChatPrintAll("[HostMap] Usage: !hostmap <workshop id>");
+		ChatPrintAll("Usage: !hostmap <workshop id>");
 		return;
 	}
 	ISteamUGC *pUGC = s_SteamAPI.SteamUGC();
 	if (!pUGC)
 	{
-		ChatPrintAll("[HostMap] Steam is not available yet, try again in a moment.");
+		ChatPrintAll("Steam is not available yet, try again in a moment.");
 		return;
 	}
 
@@ -128,7 +139,7 @@ static void StartRequest(CPlayerSlot slot, const char *arguments)
 	{
 		if (hQuery != k_UGCQueryHandleInvalid)
 			pUGC->ReleaseQueryUGCRequest(hQuery);
-		ChatPrintAll("[HostMap] Could not query workshop item %llu.", fileId);
+		ChatPrintAll("Could not query workshop item %llu.", fileId);
 		return;
 	}
 	s_Request.state = EHostState::Querying;
@@ -137,7 +148,7 @@ static void StartRequest(CPlayerSlot slot, const char *arguments)
 	s_Request.hCall = hCall;
 
 	const char *playerName = slot.Get() >= 0 ? g_pEngineServer->GetClientConVarValue(slot, "name") : nullptr;
-	ChatPrintAll("[HostMap] %s requested workshop map %llu, looking it up...", playerName && *playerName ? playerName : "Console", fileId);
+	ChatPrintAll("%s requested workshop map %llu, looking it up...", playerName && *playerName ? playerName : "Console", fileId);
 }
 
 static void UpdateQuery()
@@ -165,20 +176,20 @@ static void UpdateQuery()
 
 	if (!bOk)
 	{
-		ChatPrintAll("[HostMap] Workshop item %llu was not found.", fileId);
+		ChatPrintAll("Workshop item %llu was not found.", fileId);
 		ResetRequest();
 		return;
 	}
 	if (details.m_nConsumerAppID != 730 || details.m_eFileType == k_EWorkshopFileTypeCollection || details.m_bBanned)
 	{
-		ChatPrintAll("[HostMap] Workshop item %llu is not a CS2 map.", fileId);
+		ChatPrintAll("Workshop item %llu is not a CS2 map.", fileId);
 		ResetRequest();
 		return;
 	}
 
 	s_Request.title = details.m_rgchTitle;
 	uint64 size = details.m_ulTotalFilesSize ? details.m_ulTotalFilesSize : (uint64)(details.m_nFileSize > 0 ? details.m_nFileSize : 0);
-	ChatPrintAll("[HostMap] %s (%llu): last updated %s, size %s.", s_Request.title.c_str(), fileId,
+	ChatPrintAll("%s (%llu): last updated %s, size %s.", s_Request.title.c_str(), fileId,
 		FormatDate(details.m_rtimeUpdated).c_str(), size ? FormatSize(size).c_str() : "unknown");
 
 	// The workshop manager downloads the item and changes to it once it is installed.
@@ -216,9 +227,9 @@ static void UpdateDownload()
 	if (bDone)
 	{
 		if (bInstalled)
-			ChatPrintAll("[HostMap] %s is ready, changing map.", s_Request.title.c_str());
+			ChatPrintAll("%s is ready, changing map.", s_Request.title.c_str());
 		else
-			ChatPrintAll("[HostMap] Failed to download %s.", s_Request.title.c_str());
+			ChatPrintAll("Failed to download %s.", s_Request.title.c_str());
 		ResetRequest();
 		return;
 	}
@@ -229,7 +240,7 @@ static void UpdateDownload()
 	uint64 downloaded = 0, total = 0;
 	if (bDownloading && pUGC->GetItemDownloadInfo(s_Request.fileId, &downloaded, &total) && total > 0)
 	{
-		ChatPrintAll("[HostMap] Downloading %s: %d%% (%s / %s)", s_Request.title.c_str(), (int)(downloaded * 100 / total),
+		ChatPrintAll("Downloading %s: %d%% (%s / %s)", s_Request.title.c_str(), (int)(downloaded * 100 / total),
 			FormatSize(downloaded).c_str(), FormatSize(total).c_str());
 	}
 }
@@ -252,6 +263,8 @@ bool WSHostMapPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxle
 	GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
 	GET_V_IFACE_CURRENT(GetEngineFactory, g_pEngineServer, IVEngineServer2, INTERFACEVERSION_VENGINESERVER);
 	GET_V_IFACE_ANY(GetServerFactory, g_pSource2Server, ISource2Server, SOURCE2SERVER_INTERFACE_VERSION);
+	GET_V_IFACE_CURRENT(GetEngineFactory, g_pNetworkMessages, INetworkMessages, NETWORKMESSAGES_INTERFACE_VERSION);
+	GET_V_IFACE_CURRENT(GetEngineFactory, s_pGameEventSystem, IGameEventSystem, GAMEEVENTSYSTEM_INTERFACE_VERSION);
 	g_SMAPI->AddListener(this, this);
 	if (late)
 		s_SteamAPI.Init();

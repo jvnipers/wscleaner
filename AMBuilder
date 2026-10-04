@@ -3,21 +3,29 @@ import os
 
 # Each entry is a separate Metamod plugin. wshostmap is optional: server owners install it only if they want
 # players to host workshop maps from chat.
+# Sources and the protobuf files (relative to the SDK) each one compiles.
 plugins = {
-  MMSPlugin.metadata["name"]: [
+  MMSPlugin.metadata["name"]: ([
     'src/plugin.cpp',
     'src/addons.cpp',
     'src/workshop_manager.cpp',
     'src/rtti.cpp',
-  ],
-  'wshostmap': [
+  ], [
+    'common/network_connection.proto',
+  ]),
+  'wshostmap': ([
     'src/hostmap.cpp',
     'src/workshop_manager.cpp',
     'src/rtti.cpp',
-  ],
+  ], [
+    'common/network_connection.proto',
+    'common/networkbasetypes.proto',
+    'common/valveextensions.proto',
+    'game/shared/usermessages.proto',
+  ]),
 }
 
-for name, sources in plugins.items():
+for name, (sources, protos) in plugins.items():
   project = builder.LibraryProject(name)
 
   for sdk_target in MMSPlugin.sdk_targets:
@@ -29,7 +37,7 @@ for name, sources in plugins.items():
     binary.sources += sources
 
     binary.custom = [builder.tools.Protoc(protoc = sdk_target.protoc, sources = [
-      os.path.join(sdk['path'], 'common', 'network_connection.proto'),
+      os.path.join(sdk['path'], proto) for proto in protos
     ])]
 
     if binary.compiler.target.platform == 'windows':
