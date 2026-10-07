@@ -108,6 +108,11 @@ SdkHelpers = builder.Eval(os.path.join(hl2sdk_manifests_root, 'SdkHelpers.ambuil
   'Project': 'metamod'
 })
 
+# Keep linking the prebuilt libs from the manifest.
+SdkHelpers.findSdks.__globals__['SdkTarget'].findLibrary = staticmethod(
+  lambda context, sdk, cxx, name: None
+)
+
 class MMSPluginConfig(object):
   def __init__(self):
     self.sdk_manifests = []
@@ -153,7 +158,7 @@ class MMSPluginConfig(object):
         raise Exception('No suitable C/C++ compiler was found.')
 
   def findSdkPath(self, sdk_name):
-    dir_name = 'hl2sdk-{}'.format(sdk_name)
+    dir_name = 's2sdk'
     hl2sdk_root = builder.options.hl2sdk_root
     if not hl2sdk_root:
       hl2sdk_root = resolveEnvPath('HL2SDKROOT')
