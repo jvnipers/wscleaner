@@ -67,7 +67,7 @@ static void ChatPrintAll(const char *format, ...)
 			text += *c;
 	}
 
-	INetworkMessageInternal *pNetMsg = g_pNetworkMessages->FindNetworkMessagePartial("TextMsg");
+	NetMessageInfo_t *pNetMsg = g_pNetworkMessages->FindNetworkMessagePartial("TextMsg");
 	if (!pNetMsg)
 		return;
 	CNetMessagePB<CUserMessageTextMsg> *pMsg = pNetMsg->AllocateMessage()->ToPB<CUserMessageTextMsg>();
